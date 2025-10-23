@@ -1,0 +1,85 @@
+# 编译生成的文件
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# 构建目录
+build/
+bin/
+obj/
+Debug/
+Release/
+x64/
+x86/
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+
+# 预编译头文件
+*.pch
+*.gch
+
+# 依赖文件
+*.d
+
+# 静态分析器结果
+*.plist
+
+# 编译生成的临时文件
+*.tmp
+*.temp
+
+# 可执行文件（无扩展名）
+!*.exe
+
+# IDE 相关文件
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.cmake
+
+# CLion
+.idea/
+cmake-build-*/
+
+# Eclipse
+.settings/
+.project
+.cproject
+
+# VS Code
+.vscode/
+
+# 编译输出目录
+out/
+dist/
+
+# 包配置文件
+*.pc
+
+# 自动生成的文件
+autom4te.cache/
+*.m4
+
+# 日志文件
+*.log
+
+# 核心转储文件
+core
+*.core
+
+# macOS
+.DS_Store
+
+# 备份文件
+*~
+*.bak
+*.swp

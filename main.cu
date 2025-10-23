@@ -26,8 +26,286 @@
 #include "MarchingCubes.cuh"
 #include "iomanip"
 
-#define FORCE_UNIT_NORMALS 1
+#include <cublas_v2.h>
+#include <cusolverDn.h>
 
+#define FORCE_UNIT_NORMALS 1
+#define MAX_KNN_NEIGHBORS 64 // 最大k近邻数
+
+extern "C" int VoxelGridFilterGPU(Point3D<float>* d_points, Point3D<float>* d_normals, int N, float leaf_size,
+                                  Point3D<float>** out_points_d, Point3D<float>** out_normals_d, int* out_count);
+
+extern "C" void ImproveNormalsGPU(Point3D<float>* d_points, Point3D<float>* d_normals, int N,
+                                  float smooth_radius, int max_bruteforce_points);
+                                  // 参数：
+//   samplePoints_d   - 输入/输出：设备指针地址（函数可能替换指针并 free 旧指针）
+//   sampleNormals_d  - 输入/输出：设备法线指针地址（可能为 nullptr；函数可能替换）
+//   count            - 输入/输出：点数（函数可能修改）
+//   voxel_leaf       - 体素边长（与点坐标单位一致）
+// 返回：不返回值；出错会打印信息并保留原数据
+inline void ApplyVoxelGridFilterGPU(Point3D<float> **samplePoints_d,
+                                    Point3D<float> **sampleNormals_d,
+                                    int *count,
+                                    float voxel_leaf)
+{
+    if(!samplePoints_d || *samplePoints_d==nullptr) return;
+    if(!count || *count<=0) return;
+    if(voxel_leaf <= 0.f) return;
+
+    Point3D<float>* filteredPoints_d = nullptr;
+    Point3D<float>* filteredNormals_d = nullptr;
+    int filtered_count = 0;
+
+    int vg_err = VoxelGridFilterGPU(*samplePoints_d,
+                                    (*sampleNormals_d),   // may be nullptr
+                                    *count,
+                                    voxel_leaf,
+                                    &filteredPoints_d,
+                                    &filteredNormals_d,
+                                    &filtered_count);
+
+    if(vg_err != 0) {
+        fprintf(stderr, "VoxelGridFilterGPU failed: %d\n", vg_err);
+        if(filteredPoints_d) cudaFree(filteredPoints_d);
+        if(filteredNormals_d) cudaFree(filteredNormals_d);
+        return;
+    }
+
+    // 如果滤波减少了点数，则用滤波结果替换原始缓冲
+    if(filtered_count > 0 && filtered_count < *count) {
+        // 释放旧数组（主程序中其它地方应不再使用旧指针）
+        cudaFree(*samplePoints_d);
+        if(*sampleNormals_d) cudaFree(*sampleNormals_d);
+
+        *samplePoints_d  = filteredPoints_d;
+        *sampleNormals_d = filteredNormals_d;
+        *count = filtered_count;
+
+        printf("Voxel grid filter reduced points to %d\n", *count);
+    } else {
+        // 未减少或未改变：释放中间结果并保留原数组
+        if(filteredPoints_d) cudaFree(filteredPoints_d);
+        if(filteredNormals_d) cudaFree(filteredNormals_d);
+    }
+}
+                                  
+__device__ __forceinline__ void knn_insert(float dist, int idx, float* bestDist, int* bestIdx, int k)
+{
+    if(dist >= bestDist[k-1]) return;
+    int pos = k - 1;
+    while(pos > 0 && dist < bestDist[pos-1])
+    {
+        bestDist[pos] = bestDist[pos-1];
+        bestIdx [pos] = bestIdx [pos-1];
+        --pos;
+    }
+    bestDist[pos] = dist;
+    bestIdx [pos] = idx;
+}
+
+__device__ void smallest_eigen_vector_sym3(float m[3][3], float out[3])
+{
+    float v[3][3] = { {1.f,0.f,0.f},{0.f,1.f,0.f},{0.f,0.f,1.f} };
+    for(int iter=0; iter<8; ++iter)
+    {
+        int p=0,q=1;
+        float maxVal = fabsf(m[0][1]);
+        float v02 = fabsf(m[0][2]);
+        if(v02>maxVal){ maxVal=v02; p=0; q=2; }
+        float v12 = fabsf(m[1][2]);
+        if(v12>maxVal){ maxVal=v12; p=1; q=2; }
+        if(maxVal < 1e-7f) break;
+        float diff = m[q][q] - m[p][p];
+        float denom = fabsf(diff) < 1e-7f ? copysignf(1e-7f, diff) : diff;
+        float phi = 0.5f * atanf((2.f * m[p][q]) / denom);
+        float c = cosf(phi);
+        float s = sinf(phi);
+        for(int k=0;k<3;++k)
+        {
+            float mpk = m[p][k];
+            float mqk = m[q][k];
+            m[p][k] = c*mpk - s*mqk;
+            m[q][k] = s*mpk + c*mqk;
+        }
+        for(int k=0;k<3;++k)
+        {
+            float mkp = m[k][p];
+            float mkq = m[k][q];
+            m[k][p] = c*mkp - s*mkq;
+            m[k][q] = s*mkp + c*mkq;
+        }
+        m[p][q] = m[q][p] = 0.f;
+        for(int k=0;k<3;++k)
+        {
+            float vkp = v[k][p];
+            float vkq = v[k][q];
+            v[k][p] = c*vkp - s*vkq;
+            v[k][q] = s*vkp + c*vkq;
+        }
+    }
+    int minIdx = (m[1][1] < m[0][0]) ? 1 : 0;
+    if(m[2][2] < m[minIdx][minIdx]) minIdx = 2;
+    out[0] = v[0][minIdx];
+    out[1] = v[1][minIdx];
+    out[2] = v[2][minIdx];
+}
+
+__global__ void tiled_knn_kernel(const float* __restrict__ points, int n, int k, int* __restrict__ indices)
+{
+    extern __shared__ float shared[];
+    float* sx = shared;
+    float* sy = shared + blockDim.x;
+    float* sz = shared + 2 * blockDim.x;
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    float px = 0.f, py = 0.f, pz = 0.f;
+    if(tid < n)
+    {
+        px = points[3*tid + 0];
+        py = points[3*tid + 1];
+        pz = points[3*tid + 2];
+    }
+
+    float bestDist[MAX_KNN_NEIGHBORS];
+    int   bestIdx [MAX_KNN_NEIGHBORS];
+    for(int i=0;i<k;++i){ bestDist[i]=FLT_MAX; bestIdx[i]=-1; }
+
+    for(int base=0;base<n;base+=blockDim.x)
+    {
+        int j = base + threadIdx.x;
+        if(j < n)
+        {
+            sx[threadIdx.x] = points[3*j + 0];
+            sy[threadIdx.x] = points[3*j + 1];
+            sz[threadIdx.x] = points[3*j + 2];
+        }
+        __syncthreads();
+
+        int tileCount = min(blockDim.x, n - base);
+        for(int t=0;t<tileCount;++t)
+        {
+            int globalIdx = base + t;
+            float dx = px - sx[t];
+            float dy = py - sy[t];
+            float dz = pz - sz[t];
+            float dist = dx*dx + dy*dy + dz*dz;
+            if(globalIdx == tid) dist = FLT_MAX;
+            knn_insert(dist, globalIdx, bestDist, bestIdx, k);
+        }
+        __syncthreads();
+    }
+
+    if(tid < n)
+    {
+        for(int i=0;i<k;++i)
+        {
+            indices[tid*k + i] = bestIdx[i] < 0 ? tid : bestIdx[i];
+        }
+    }
+}
+
+void gpu_knn(const float* d_points, int num_points, int k, int* d_indices)
+{
+    if(num_points<=0 || k<=0) return;
+    int threads = 256;
+    int blocks  = (num_points + threads - 1) / threads;
+    size_t sharedBytes = sizeof(float) * 3 * threads;
+    tiled_knn_kernel<<<blocks, threads, sharedBytes>>>(d_points, num_points, k, d_indices);
+    CHECK(cudaGetLastError());
+}
+
+__global__ void estimate_normals_kernel(const float* __restrict__ d_points,
+                                        const int* __restrict__ d_indices,
+                                        float* __restrict__ d_normals,
+                                        int num_points,
+                                        int k)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= num_points) return;
+
+    const int* knn = d_indices + idx * k;
+
+    float mean0 = 0.f, mean1 = 0.f, mean2 = 0.f;
+    for(int i = 0; i < k; ++i)
+    {
+        int ni = knn[i];
+        mean0 += d_points[3 * ni + 0];
+        mean1 += d_points[3 * ni + 1];
+        mean2 += d_points[3 * ni + 2];
+    }
+    float invK = 1.f / static_cast<float>(k);
+    mean0 *= invK;
+    mean1 *= invK;
+    mean2 *= invK;
+
+    float cov[3][3] = { {0.f,0.f,0.f},{0.f,0.f,0.f},{0.f,0.f,0.f} };
+    for(int i = 0; i < k; ++i)
+    {
+        int ni = knn[i];
+        float x0 = d_points[3 * ni + 0] - mean0;
+        float x1 = d_points[3 * ni + 1] - mean1;
+        float x2 = d_points[3 * ni + 2] - mean2;
+
+        cov[0][0] += x0 * x0; cov[0][1] += x0 * x1; cov[0][2] += x0 * x2;
+        cov[1][0] += x1 * x0; cov[1][1] += x1 * x1; cov[1][2] += x1 * x2;
+        cov[2][0] += x2 * x0; cov[2][1] += x2 * x1; cov[2][2] += x2 * x2;
+    }
+
+    cov[0][0] *= invK; cov[0][1] *= invK; cov[0][2] *= invK;
+    cov[1][0] *= invK; cov[1][1] *= invK; cov[1][2] *= invK;
+    cov[2][0] *= invK; cov[2][1] *= invK; cov[2][2] *= invK;
+
+    cov[0][1] = cov[1][0] = 0.5f * (cov[0][1] + cov[1][0]);
+    cov[0][2] = cov[2][0] = 0.5f * (cov[0][2] + cov[2][0]);
+    cov[1][2] = cov[2][1] = 0.5f * (cov[1][2] + cov[2][1]);
+
+    float normal[3];
+    smallest_eigen_vector_sym3(cov, normal);
+
+    float len = sqrtf(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+    if(len > 1e-8f)
+    {
+        float invLen = 1.f / len;
+        d_normals[3 * idx + 0] = normal[0] * invLen;
+        d_normals[3 * idx + 1] = normal[1] * invLen;
+        d_normals[3 * idx + 2] = normal[2] * invLen;
+    }
+    else
+    {
+        d_normals[3 * idx + 0] = 0.f;
+        d_normals[3 * idx + 1] = 0.f;
+        d_normals[3 * idx + 2] = 1.f;
+    }
+}
+
+void EstimateNormalsGPU(Point3D<float>* d_points,
+                        Point3D<float>* d_normals,
+                        int count,
+                        int k)
+{
+    if(count <= 0) return;
+
+    if(k < 3) k = 3;
+    if(k > count) k = count;
+    if(k > MAX_KNN_NEIGHBORS) k = MAX_KNN_NEIGHBORS;
+
+    int* d_indices = nullptr;
+    CHECK(cudaMalloc(&d_indices, sizeof(int) * count * k));
+
+    gpu_knn(reinterpret_cast<const float*>(d_points), count, k, d_indices);
+
+    int threads = 256;
+    int blocks  = (count + threads - 1) / threads;
+    estimate_normals_kernel<<<blocks, threads>>>(reinterpret_cast<const float*>(d_points),
+                                                 d_indices,
+                                                 reinterpret_cast<float*>(d_normals),
+                                                 count,
+                                                 k);
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+
+    cudaFree(d_indices);
+}
 
 __device__ __host__ int qpow(int p,int q) {
     int res=1;
@@ -510,7 +788,7 @@ __global__ void computeNeighbor(OctNode *NodeArray,int left,int right,int depthD
 
 __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float &scale,int &count,int &NodeArray_sz,
                                      int NodeArrayCount_h[maxDepth_h+1],int BaseAddressArray_h[maxDepth_h+1], //host
-                                     Point3D<float> *&samplePoints_d,Point3D<float> *&sampleNormals_d,int *&PointToNodeArrayD,OctNode *&NodeArray)    //device
+                                     Point3D<float> *&samplePoints_d,Point3D<float> *&sampleNormals_d,int *&PointToNodeArrayD,OctNode *&NodeArray,int k)    //device
 {
     count=0;
     PointStream<float>* pointStream;
@@ -549,6 +827,9 @@ __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float
 
     pointStream->reset();
     int idx=0;
+
+
+
     while(pointStream->nextPoint(position,normal)){
         int i;
         for(i=0;i<DIMENSION;++i)
@@ -574,11 +855,34 @@ __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float
     double mid=cpuSecond();
     printf("Total points number:%d ,Read takes:%lfs\n",count,mid-st);
 
+    bool needEstimateNormals = false;
+    for(int i = 0; i < count; ++i)
+    {
+        float nx = n_h[i].coords[0];
+        float ny = n_h[i].coords[1];
+        float nz = n_h[i].coords[2];
+        if(nx * nx + ny * ny + nz * nz < 1e-10f)
+        {
+            needEstimateNormals = true;
+            break;
+        }
+    }
     CHECK(cudaMalloc((Point3D<float> **)&samplePoints_d,sizeof(Point3D<float>) * count));
     CHECK(cudaMemcpy(samplePoints_d,p_h,sizeof(Point3D<float>) * count, cudaMemcpyHostToDevice));
 
     CHECK(cudaMalloc((Point3D<float> **)&sampleNormals_d,sizeof(Point3D<float>) * count));
     CHECK(cudaMemcpy(sampleNormals_d,n_h,sizeof(Point3D<float>) * count, cudaMemcpyHostToDevice));
+
+    ApplyVoxelGridFilterGPU(&samplePoints_d, &sampleNormals_d, &count, 1.0f/512.0f);
+    
+    if(needEstimateNormals){
+        EstimateNormalsGPU(samplePoints_d, sampleNormals_d, count, k);
+        CHECK(cudaMemcpy(n_h, sampleNormals_d, sizeof(Point3D<float>) * count, cudaMemcpyDeviceToHost));
+    }
+    float smooth_radius = 0.01f;           // 根据点云尺度调整，0.01 只是示例
+    int max_bruteforce_points = 50000;     // 当 N <= 50000 才做暴力平滑
+    ImproveNormalsGPU(samplePoints_d, sampleNormals_d, count, smooth_radius, max_bruteforce_points);
+
 
     /**     Step 2: compute shuffled xyz key and sorting code   */
     long long *key=NULL;
@@ -3244,12 +3548,25 @@ __host__ void insertTriangle(Point3D<float> *VertexBuffer,const int &allVexNums,
     }
 }
 
-int main() {
+int main(int argc,char** argv) {
 //    char fileName[]="/home/davidxu/horse.npts";
 //    char outName[]="/home/davidxu/horse.ply";
 
-    char fileName[]="/home/davidxu/bunny.points.ply";
-    char outName[]="/home/davidxu/bunny.ply";
+    // char fileName[]="/home/zwq/Poisson-Surface-Reconstruction-GPU/PointCloudData/data_ply_normal/bunny/bunny.ply";
+    // char outName[]="/home/zwq/Poisson-Surface-Reconstruction-GPU/PointCloudData/data_ply_normal/bunny/bunny_out.ply";
+    
+//-    char outName[]="/home/zwq/Poisson-Surface-Reconstruction-GPU/PointCloudData/data_ply_normal/bunny/bunny_out.ply";
+    if(argc < 4){
+        fprintf(stderr, "Usage: %s <input.ply> <output.ply> <k>\n", argc ? argv[0] : "program");
+        return 1;
+    }
+    int k = atoi(argv[3]);
+    char fileName[1024];
+    char outName[1024];
+    snprintf(fileName, sizeof(fileName), "%s", argv[1]);
+    snprintf(outName,  sizeof(outName),  "%s", argv[2]);
+    // const char *fileName = argv[1];
+    // const char *outName  = argv[2];
 
 //    char fileName[]="/home/davidxu/eagle.points.ply";
 //    char outName[]="/home/davidxu/eagle.ply";
@@ -3273,7 +3590,7 @@ int main() {
     // the number of nodes at maxDepth is very large, some maintaining of their info is time-consuming
     pipelineBuildNodeArray(fileName,center,scale,count,NodeArray_sz,
                            NodeArrayCount_h,BaseAddressArray,
-                           samplePoints_d,sampleNormals_d,PointToNodeArrayD,NodeArray );
+                           samplePoints_d,sampleNormals_d,PointToNodeArrayD,NodeArray,k);
 
     printf("NodeArray_sz:%d\n",NodeArray_sz);
 
