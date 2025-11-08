@@ -357,7 +357,10 @@ PlyProperty PlyOrientedVertex< float >::ReadProperties[]=
     {"z", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,point.coords[2])), 0, 0, 0, 0},
     {"nx", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[0])), 0, 0, 0, 0},
     {"ny", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[1])), 0, 0, 0, 0},
-    {"nz", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0}
+    {"nz", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0},
+    {"red",   PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[0])), 0, 0, 0, 0},
+    {"green", PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[1])), 0, 0, 0, 0},
+    {"blue",  PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[2])), 0, 0, 0, 0}
 };
 template<>
 PlyProperty PlyOrientedVertex< float >::WriteProperties[]=
@@ -367,7 +370,10 @@ PlyProperty PlyOrientedVertex< float >::WriteProperties[]=
     {"z", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,point.coords[2])), 0, 0, 0, 0},
     {"nx", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[0])), 0, 0, 0, 0},
     {"ny", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[1])), 0, 0, 0, 0},
-    {"nz", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0}
+    {"nz", PLY_FLOAT, PLY_FLOAT, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0},
+    {"red",   PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[0])), 0, 0, 0, 0},
+    {"green", PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[1])), 0, 0, 0, 0},
+    {"blue",  PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[2])), 0, 0, 0, 0}
 };
 template<>
 PlyProperty PlyOrientedVertex< double >::ReadProperties[]=
@@ -377,7 +383,10 @@ PlyProperty PlyOrientedVertex< double >::ReadProperties[]=
     {"z", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,point.coords[2])), 0, 0, 0, 0},
     {"nx", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[0])), 0, 0, 0, 0},
     {"ny", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[1])), 0, 0, 0, 0},
-    {"nz", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0}
+    {"nz", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0},
+    {"red",   PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[0])), 0, 0, 0, 0},
+    {"green", PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[1])), 0, 0, 0, 0},
+    {"blue",  PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[2])), 0, 0, 0, 0}
 };
 template<>
 PlyProperty PlyOrientedVertex< double >::WriteProperties[]=
@@ -387,7 +396,10 @@ PlyProperty PlyOrientedVertex< double >::WriteProperties[]=
     {"z", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,point.coords[2])), 0, 0, 0, 0},
     {"nx", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[0])), 0, 0, 0, 0},
     {"ny", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[1])), 0, 0, 0, 0},
-    {"nz", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0}
+    {"nz", PLY_DOUBLE, PLY_DOUBLE, int(offsetof(PlyOrientedVertex,normal.coords[2])), 0, 0, 0, 0},
+    {"red",   PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[0])), 0, 0, 0, 0},
+    {"green", PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[1])), 0, 0, 0, 0},
+    {"blue",  PLY_UCHAR, PLY_UCHAR, int(offsetof(PlyOrientedVertex,point.color[2])), 0, 0, 0, 0}
 };
 
 template< class Real >
@@ -432,6 +444,7 @@ void PLYPointStream< Real >::reset( void )
 
             bool hasPos[3] = {false,false,false};
             bool hasNorm[3] = {false,false,false};
+            bool hasColor[3] = {false,false,false}; 
 
             for( int j=0 ; j<nr_props ; j++ )
             {
@@ -442,6 +455,9 @@ void PLYPointStream< Real >::reset( void )
                 else if( equal_strings( name , "nx" ) ) hasNorm[0] = true;
                 else if( equal_strings( name , "ny" ) ) hasNorm[1] = true;
                 else if( equal_strings( name , "nz" ) ) hasNorm[2] = true;
+                else if( equal_strings( name , "red" ) ) hasColor[0] = true;
+                else if( equal_strings( name , "green" ) ) hasColor[1] = true;
+                else if( equal_strings( name , "blue" ) ) hasColor[2] = true;
             }
 
             if( !hasPos[0] || !hasPos[1] || !hasPos[2] )
@@ -465,6 +481,30 @@ void PLYPointStream< Real >::reset( void )
                     {
                         fprintf( stderr , "[WARNING] Failed to bind normal property %s in ply file: %s. Normals will be ignored.\n" , PlyOrientedVertex< Real >::ReadProperties[c].name , _fileName );
                         _hasNormals = false;
+                        break;
+                    }
+            }
+            
+            // 有颜色有法线
+            _hasColor = hasColor[0] && hasColor[1] && hasColor[2];
+            if( _hasColor && _hasNormals )
+            {
+                for( int c=6 ; c<9 ; ++c )
+                    if( !ply_get_property( _ply , elem_name , &(PlyOrientedVertex< Real >::ReadProperties[c]) ) )
+                    {
+                        fprintf( stderr , "[WARNING] Failed to bind color property %s in ply file: %s. Colors will be ignored.\n" , PlyOrientedVertex< Real >::ReadProperties[c].name , _fileName );
+                        _hasColor = false;
+                        break;
+                    }
+            }
+            // 有颜色无法线
+            if( _hasColor && (!_hasNormals) )
+            {
+                for( int c=6 ; c<9 ; ++c )
+                    if( !ply_get_property( _ply , elem_name , &(PlyOrientedVertex< Real >::ReadProperties[c]) ) )
+                    {
+                        fprintf( stderr , "[WARNING] Failed to bind color property %s in ply file: %s. Colors will be ignored.\n" , PlyOrientedVertex< Real >::ReadProperties[c].name , _fileName );
+                        _hasColor = false;
                         break;
                     }
             }

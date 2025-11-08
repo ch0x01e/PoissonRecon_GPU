@@ -838,6 +838,7 @@ __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float
             if(position.coords[i]<0 || position.coords[i]>1)
                 break;
         p_h[idx]=position;
+        // printf("p_h[%d] color: %d %d %d\n", idx, p_h[idx].color[0], p_h[idx].color[1], p_h[idx].color[2]);
 
 #if FORCE_UNIT_NORMALS
         float len=float(Length(normal));
@@ -873,6 +874,13 @@ __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float
     CHECK(cudaMalloc((Point3D<float> **)&sampleNormals_d,sizeof(Point3D<float>) * count));
     CHECK(cudaMemcpy(sampleNormals_d,n_h,sizeof(Point3D<float>) * count, cudaMemcpyHostToDevice));
 
+    // 报错，samplePoints_d在GPU上，无法直接打印
+    // for (int i = 0; i < 10; i++)
+    // {
+    //     /* code */
+    //     printf("samplePoints_d[%d] color: %d %d %d\n", i, samplePoints_d[i].color[0], samplePoints_d[i].color[1], samplePoints_d[i].color[2]);
+    // }
+    
     ApplyVoxelGridFilterGPU(&samplePoints_d, &sampleNormals_d, &count, 1.0f/512.0f);
     
     if(needEstimateNormals){
@@ -1796,6 +1804,12 @@ __global__ void initVertexOwner(OctNode *NodeArray,int left,int right,
                 preVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
                 preVertexArray[vertexIdx].vertexKind = j;
                 preVertexArray[vertexIdx].depth = depth;
+
+                // // 取该节点最近的原始点的颜色
+                // int nearestIdx = NodeArray[i].pidx; // 或者你有更好的最近点索引
+                // preVertexArray[vertexIdx].color[0] = samplePoints_d[nearestIdx].color[0];
+                // preVertexArray[vertexIdx].color[1] = samplePoints_d[nearestIdx].color[1];
+                // preVertexArray[vertexIdx].color[2] = samplePoints_d[nearestIdx].color[2];
             }
         }
     }
@@ -2898,6 +2912,11 @@ __device__ void interpolatePoint(const Point3D<float> &p1,const Point3D<float> &
     float another_pivot=1-pivot;
     out.coords[dim]= p2.coords[dim] * pivot + p1.coords[dim] * another_pivot;
 //    out.coords[dim]=p1.coords[dim]+(p2.coords[dim]-p1.coords[dim])*pivot;
+
+    // 颜色插值
+    for(int c=0;c<3;++c){
+        out.color[c] = static_cast<unsigned char>(p2.color[c] * pivot + p1.color[c] * another_pivot + 0.5f);
+    }
 }
 
 __global__ void generateIntersectionPoint(EdgeNode *validEdgeArray,int validEdgeArray_sz,
@@ -3574,20 +3593,24 @@ int main(int argc,char** argv) {
 //    char fileName[]="/home/davidxu/torso.points.ply";
 //    char outName[]="/home/davidxu/torso.ply";
 
+    // 每一层八叉树节点数
     int NodeArrayCount_h[maxDepth_h+1];
+    // 每一层八叉树节点起始下标
     int BaseAddressArray[maxDepth_h+1];
 
     Point3D<float> *samplePoints_d=NULL, *sampleNormals_d=NULL;
-    int *PointToNodeArrayD;
-    OctNode *NodeArray;
-    int count=0;
-    int NodeArray_sz=0;
-    Point3D<float> center;
-    float scale;
+    int *PointToNodeArrayD; 
+    OctNode *NodeArray; // 八叉树所有节点
+    int count=0; // 点云总数
+    int NodeArray_sz=0; // 八叉树节点总数
+    Point3D<float> center; // 点云中心
+    float scale; // 点云缩放系数
 
     double project_st=cpuSecond();
 
     // the number of nodes at maxDepth is very large, some maintaining of their info is time-consuming
+    
+    // 构建八叉树节点、点云归一化、点云数据加载
     pipelineBuildNodeArray(fileName,center,scale,count,NodeArray_sz,
                            NodeArrayCount_h,BaseAddressArray,
                            samplePoints_d,sampleNormals_d,PointToNodeArrayD,NodeArray,k);
@@ -3596,7 +3619,8 @@ int main(int argc,char** argv) {
 
 //    outputDeviceArray<<<1,1>>>(PointToNodeArrayD,20);
 //    cudaDeviceSynchronize();
-
+    
+    // 分配并拷贝八叉树层级信息到device 
     int *BaseAddressArray_d=NULL;
     CHECK(cudaMalloc((int **)&BaseAddressArray_d,sizeof(int)*(maxDepth_h+1) ));
     CHECK(cudaMemcpy(BaseAddressArray_d,BaseAddressArray,sizeof(int)*(maxDepth_h+1),cudaMemcpyHostToDevice));
@@ -3621,12 +3645,12 @@ int main(int argc,char** argv) {
     // ----------------------------------------------------
 
     double cpu_st=cpuSecond();
-
+    // 高斯近似重建函数、近似物体的表面的指示函数
     PPolynomial<convTimes> ReconstructionFunction = PPolynomial<convTimes>::GaussianApproximation();
     FunctionData<convTimes,double> fData;
     fData.set(maxDepth_h,ReconstructionFunction,normalize,0);
     //  precomputed inner product table may can be optimized to GPU parallel
-    fData.setDotTables(fData.DOT_FLAG | fData.D_DOT_FLAG | fData.D2_DOT_FLAG);
+    fData.setDotTables(fData.DOT_FLAG | fData.D_DOT_FLAG | fData.D2_DOT_FLAG);// 设置内积表
     PPolynomial<convTimes> &F=ReconstructionFunction;
     switch(normalize){
         case 2:

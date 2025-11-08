@@ -164,6 +164,7 @@ class PLYPointStream : public PointStream< Real >
 
     int _pCount , _pIdx;
     bool _hasNormals;
+    bool _hasColor;
 
     void _free( void );
 public:

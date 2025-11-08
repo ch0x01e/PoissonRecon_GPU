@@ -2734,6 +2734,7 @@ char *elem_names[] = { "vertex", "face" };
 
 typedef struct PlyVertex {
     float x, y, z;
+    unsigned char red, green, blue;
 } PlyVertex;
 
 typedef struct oldPlyOrientedVertex {
@@ -2749,7 +2750,10 @@ typedef struct PlyFace {
 static PlyProperty vert_props[] = {
         {"x", PLY_FLOAT, PLY_FLOAT, offsetof(PlyVertex,x), 0, 0, 0, 0},
         {"y", PLY_FLOAT, PLY_FLOAT, offsetof(PlyVertex,y), 0, 0, 0, 0},
-        {"z", PLY_FLOAT, PLY_FLOAT, offsetof(PlyVertex,z), 0, 0, 0, 0}
+        {"z", PLY_FLOAT, PLY_FLOAT, offsetof(PlyVertex,z), 0, 0, 0, 0},
+		{"red",   PLY_UCHAR, PLY_UCHAR, offsetof(PlyVertex,red),   0, 0, 0, 0},
+    	{"green", PLY_UCHAR, PLY_UCHAR, offsetof(PlyVertex,green), 0, 0, 0, 0},
+    	{"blue",  PLY_UCHAR, PLY_UCHAR, offsetof(PlyVertex,blue),  0, 0, 0, 0}
 };
 static PlyProperty oriented_vert_props[] = {
         {"x",  PLY_FLOAT, PLY_FLOAT, offsetof(oldPlyOrientedVertex,x ), 0, 0, 0, 0},
@@ -2784,6 +2788,10 @@ int PlyWriteTriangles(char* fileName,CoredMeshData* mesh,int file_type,const Poi
     ply_describe_property(ply, "vertex", &vert_props[1]);
     ply_describe_property(ply, "vertex", &vert_props[2]);
 
+	ply_describe_property(ply, "vertex", &vert_props[3]);
+	ply_describe_property(ply, "vertex", &vert_props[4]);
+	ply_describe_property(ply, "vertex", &vert_props[5]);
+
     ply_element_count(ply, "face", nr_faces);
     ply_describe_property(ply, "face", &face_props[0]);
 
@@ -2800,7 +2808,10 @@ int PlyWriteTriangles(char* fileName,CoredMeshData* mesh,int file_type,const Poi
         p=mesh->inCorePoints[i];
         ply_vertex.x = p.coords[0]*scale+translate.coords[0];
         ply_vertex.y = p.coords[1]*scale+translate.coords[1];
-        ply_vertex.z = p.coords[2]*scale+translate.coords[2];
+        ply_vertex.z = p.coords[2]*scale+translate.coords[2];		
+		ply_vertex.red   = p.color[0];
+		ply_vertex.green = p.color[1];
+		ply_vertex.blue  = p.color[2];
         ply_put_element(ply, (void *) &ply_vertex);
     }
     for (i=0; i < mesh->outOfCorePointCount(); i++){
@@ -2809,6 +2820,9 @@ int PlyWriteTriangles(char* fileName,CoredMeshData* mesh,int file_type,const Poi
         ply_vertex.x = p.coords[0]*scale+translate.coords[0];
         ply_vertex.y = p.coords[1]*scale+translate.coords[1];
         ply_vertex.z = p.coords[2]*scale+translate.coords[2];
+		ply_vertex.red   = p.color[0];
+		ply_vertex.green = p.color[1];
+		ply_vertex.blue  = p.color[2];
         ply_put_element(ply, (void *) &ply_vertex);
     }  // for, write vertices
 

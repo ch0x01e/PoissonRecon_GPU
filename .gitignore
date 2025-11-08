@@ -83,3 +83,5 @@ core
 *~
 *.bak
 *.swp
+
+*.ply

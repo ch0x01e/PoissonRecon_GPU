@@ -34,23 +34,52 @@ DAMAGE.
 template<class Real>
 struct Point3D{
     Real coords[3];
+    unsigned char color[3];  // Added color field: RGB values (0-255)
     inline       Real& operator[] ( int i )       { return coords[i]; }
     inline const Real& operator[] ( int i ) const { return coords[i]; }
     __host__ __device__ Point3D(void){
         coords[0]=0;
         coords[1]=0;
         coords[2]=0;
+        color[0] = color[1] = color[2] = 0;
     }
+    __host__ __device__ Point3D(Real x, Real y, Real z, unsigned char r = 0, unsigned char g = 0, unsigned char b = 0) {
+        coords[0] = x; coords[1] = y; coords[2] = z;
+        color[0] = r; color[1] = g; color[2] = b;
+    }
+
     __host__ __device__ Point3D(const Point3D<Real>& cpy){
         coords[0]=cpy.coords[0];
         coords[1]=cpy.coords[1];
         coords[2]=cpy.coords[2];
+        color[0] = cpy.color[0];
+        color[1] = cpy.color[1];
+        color[2] = cpy.color[2];
     }
     __host__ __device__ Point3D<Real>& operator = (const Point3D<Real> &cpy){
         coords[0]=cpy.coords[0];
         coords[1]=cpy.coords[1];
         coords[2]=cpy.coords[2];
+        color[0] = cpy.color[0];
+        color[1] = cpy.color[1];
+        color[2] = cpy.color[2];
         return *this;
+    }
+
+    // 赋值颜色的方法
+    __host__ __device__
+    void setColor(unsigned char r, unsigned char g, unsigned char b) {
+        color[0] = r;
+        color[1] = g;
+        color[2] = b;
+    }
+
+    // 获取颜色的方法
+    __host__ __device__
+    void getColor(unsigned char& r, unsigned char& g, unsigned char& b) const {
+        r = color[0];
+        g = color[1];
+        b = color[2];
     }
 };
 

@@ -78,6 +78,7 @@ public:
     int depth;
     // encode the nodes?
     int nodes[8];
+    unsigned char color[3]; // 新增
 };
 
 class EdgeNode{
