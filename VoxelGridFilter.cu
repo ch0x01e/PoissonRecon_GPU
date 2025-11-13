@@ -14,13 +14,20 @@ using Point3D_f = Point3D<float>;
 struct VoxelData {
     float x, y, z;
     float nx, ny, nz;
+    float cr, cg, cb;      // 新增：颜色累加
     int cnt;
-    __host__ __device__ VoxelData() : x(0), y(0), z(0), nx(0), ny(0), nz(0), cnt(0) {}
-    __host__ __device__ VoxelData(float _x,float _y,float _z,float _nx,float _ny,float _nz,int _c)
-        : x(_x), y(_y), z(_z), nx(_nx), ny(_ny), nz(_nz), cnt(_c) {}
+    __host__ __device__ VoxelData()
+        : x(0), y(0), z(0), nx(0), ny(0), nz(0),
+          cr(0), cg(0), cb(0), cnt(0) {}
+    __host__ __device__ VoxelData(float _x,float _y,float _z,
+                                  float _nx,float _ny,float _nz,
+                                  float _cr,float _cg,float _cb,int _c)
+        : x(_x), y(_y), z(_z), nx(_nx), ny(_ny), nz(_nz),
+          cr(_cr), cg(_cg), cb(_cb), cnt(_c) {}
     __host__ __device__ VoxelData& operator+=(const VoxelData &o){
         x += o.x; y += o.y; z += o.z;
         nx += o.nx; ny += o.ny; nz += o.nz;
+        cr += o.cr; cg += o.cg; cb += o.cb;
         cnt += o.cnt;
         return *this;
     }
@@ -47,7 +54,9 @@ __global__ void compute_keys_kernel(const Point3D_f* __restrict__ points, uint64
 }
 
 // kernel: build VoxelData array from points & normals
-__global__ void build_voxeldata_kernel(const Point3D_f* __restrict__ points, const Point3D_f* __restrict__ normals, VoxelData* vals, int n) {
+__global__ void build_voxeldata_kernel(const Point3D_f* __restrict__ points,
+                                       const Point3D_f* __restrict__ normals,
+                                       VoxelData* vals, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     vals[idx].x = points[idx].coords[0];
@@ -60,11 +69,16 @@ __global__ void build_voxeldata_kernel(const Point3D_f* __restrict__ points, con
     } else {
         vals[idx].nx = vals[idx].ny = vals[idx].nz = 0.f;
     }
+    // 颜色累加初始化
+    vals[idx].cr = float(points[idx].color[0]);
+    vals[idx].cg = float(points[idx].color[1]);
+    vals[idx].cb = float(points[idx].color[2]);
     vals[idx].cnt = 1;
 }
 
 // kernel: write aggregated averages back to Point3D arrays
-__global__ void write_aggregates_kernel(const VoxelData* __restrict__ agg, Point3D_f* out_pts, Point3D_f* out_nmls, int m) {
+__global__ void write_aggregates_kernel(const VoxelData* __restrict__ agg,
+                                        Point3D_f* out_pts, Point3D_f* out_nmls, int m) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m) return;
     VoxelData v = agg[idx];
@@ -72,6 +86,13 @@ __global__ void write_aggregates_kernel(const VoxelData* __restrict__ agg, Point
     out_pts[idx].coords[0] = v.x * inv;
     out_pts[idx].coords[1] = v.y * inv;
     out_pts[idx].coords[2] = v.z * inv;
+    // 写平均颜色
+    float r = v.cr * inv;
+    float g = v.cg * inv;
+    float b = v.cb * inv;
+    out_pts[idx].color[0] = (unsigned char)fminf(fmaxf(r,0.f),255.f);
+    out_pts[idx].color[1] = (unsigned char)fminf(fmaxf(g,0.f),255.f);
+    out_pts[idx].color[2] = (unsigned char)fminf(fmaxf(b,0.f),255.f);
     if (out_nmls) {
         out_nmls[idx].coords[0] = v.nx * inv;
         out_nmls[idx].coords[1] = v.ny * inv;

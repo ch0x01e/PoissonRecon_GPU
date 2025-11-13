@@ -88,7 +88,16 @@ inline void ApplyVoxelGridFilterGPU(Point3D<float> **samplePoints_d,
         if(filteredNormals_d) cudaFree(filteredNormals_d);
     }
 }
-                                  
+                  
+
+__global__ void debugPrintSampleColors(Point3D<float>* pts, int n){
+    for(int i=0;i<min(n,16);++i){
+        printf("sample[%d] pos=(%.5f %.5f %.5f) color=%u %u %u\n",
+               i, pts[i].coords[0], pts[i].coords[1], pts[i].coords[2],
+               pts[i].color[0], pts[i].color[1], pts[i].color[2]);
+    }
+}
+
 __device__ __forceinline__ void knn_insert(float dist, int idx, float* bestDist, int* bestIdx, int k)
 {
     if(dist >= bestDist[k-1]) return;
@@ -881,7 +890,11 @@ __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float
     //     printf("samplePoints_d[%d] color: %d %d %d\n", i, samplePoints_d[i].color[0], samplePoints_d[i].color[1], samplePoints_d[i].color[2]);
     // }
     
+    // debugPrintSampleColors<<<1,1>>>(samplePoints_d,count);
+    // cudaDeviceSynchronize();
     ApplyVoxelGridFilterGPU(&samplePoints_d, &sampleNormals_d, &count, 1.0f/512.0f);
+    // debugPrintSampleColors<<<1,1>>>(samplePoints_d,count);
+    // cudaDeviceSynchronize();
     
     if(needEstimateNormals){
         EstimateNormalsGPU(samplePoints_d, sampleNormals_d, count, k);
@@ -1747,6 +1760,9 @@ __global__ void precomputeDepthAndCenter(int *BaseAddressArray_d,OctNode *NodeAr
     }
 }
 
+/**
+ * 八叉树构建 preVertexArray
+ */
 __global__ void initVertexOwner(OctNode *NodeArray,int left,int right,
                                 VertexNode *preVertexArray,
                                 int *DepthBuffer,Point3D<float> *CenterBuffer){
