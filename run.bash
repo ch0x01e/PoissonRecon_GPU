@@ -26,5 +26,7 @@ cmake ..
 make -j4
 
 # 运行程序，参数按需调整
-# ./GPU_PoissonRecon ../bunny1.ply ./bunny_recon.ply 10
-./GPU_PoissonRecon ../point.ply ../point_recon.ply 10
+# ./GPU_PoissonRecon ../bunny_blue.ply ./bunny_blue_recon.ply 10
+# ./GPU_PoissonRecon ../point.ply ../point_recon.ply 10
+
+./GPU_PoissonRecon ../bunny_random.ply ./bunny_random_recon.ply 10

@@ -89,12 +89,99 @@ inline void ApplyVoxelGridFilterGPU(Point3D<float> **samplePoints_d,
     }
 }
                   
+// 用线性三角索引 (int* triangles，长度 = 3 * tN)
+__global__ void patchBlackVertexColors_linear(Point3D<float>* verts,int vN,
+                                              const int* tris,int tN,int iterations)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if(tid>=vN) return;
+    for(int it=0; it<iterations; ++it){
+        __syncthreads();
+        unsigned char r=verts[tid].color[0];
+        unsigned char g=verts[tid].color[1];
+        unsigned char b=verts[tid].color[2];
+        if(r|g|b) continue; // 已有颜色不处理
+        unsigned int accR=0,accG=0,accB=0; int cnt=0;
+        for(int f=0; f<tN; ++f){
+            int i0 = tris[3*f+0];
+            int i1 = tris[3*f+1];
+            int i2 = tris[3*f+2];
+            bool involved = (i0==tid)||(i1==tid)||(i2==tid);
+            if(!involved) continue;
+            int ids[3]={i0,i1,i2};
+            for(int k=0;k<3;++k){
+                if(ids[k]==tid) continue;
+                unsigned char nr=verts[ids[k]].color[0];
+                unsigned char ng=verts[ids[k]].color[1];
+                unsigned char nb=verts[ids[k]].color[2];
+                if(nr|ng|nb){
+                    accR+=nr; accG+=ng; accB+=nb; cnt++;
+                }
+            }
+        }
+        if(cnt>0){
+            verts[tid].color[0]=accR/cnt;
+            verts[tid].color[1]=accG/cnt;
+            verts[tid].color[2]=accB/cnt;
+        }
+    }
+}
 
-__global__ void debugPrintSampleColors(Point3D<float>* pts, int n){
-    for(int i=0;i<min(n,16);++i){
-        printf("sample[%d] pos=(%.5f %.5f %.5f) color=%u %u %u\n",
-               i, pts[i].coords[0], pts[i].coords[1], pts[i].coords[2],
-               pts[i].color[0], pts[i].color[1], pts[i].color[2]);
+// __global__ void debugPrintSampleColors(Point3D<float>* pts, int n){
+//     for(int i=0;i<n;++i){
+//         if (pts[i].color[2]==0)
+//         {
+//             printf("sample[%d] pos=(%.5f %.5f %.5f) color=%u %u %u\n",
+//                i, pts[i].coords[0], pts[i].coords[1], pts[i].coords[2],
+//                pts[i].color[0], pts[i].color[1], pts[i].color[2]);
+//         }
+    
+//     }
+// }
+
+__global__ void debugPrintSampleColors(Point3D<float>* pts, int n, int maxPrint=50)
+{
+    // 仅用单线程执行
+    if(threadIdx.x!=0 || blockIdx.x!=0) return;
+
+    // 空指针 / 非法长度检查
+    if(!pts){
+        printf("[debugPrintSampleColors] pts == NULL\n");
+        return;
+    }
+    if(n <= 0){
+        printf("[debugPrintSampleColors] n <= 0 (%d)\n", n);
+        return;
+    }
+
+    // 限制最大遍历打印数量，避免大数据刷屏
+    if(maxPrint < 0) maxPrint = 0;
+    int limit = (maxPrint == 0) ? n : min(n, maxPrint);
+
+    printf("[debugPrintSampleColors] total=%d print=%d\n", n, limit);
+
+    // 遍历并打印 (保证 i < n)
+    for(int i=0;i<limit;++i){
+        // 可扩展更多判定，这里示例：打印 color 全零的点
+        unsigned char r = pts[i].color[0];
+        unsigned char g = pts[i].color[1];
+        unsigned char b = pts[i].color[2];
+
+        // 如果想看全部点，把下面 if 去掉
+        if(!(r|g|b)){
+            printf("sample[%d] pos=(%.5f %.5f %.5f) color=%u %u %u\n",
+                   i,
+                   pts[i].coords[0], pts[i].coords[1], pts[i].coords[2],
+                   r,g,b);
+        }
+    }
+
+    // 额外简单一致性检查：最后一个元素再读一次
+    int last = limit - 1;
+    if(last >= 0){
+        printf("[debugPrintSampleColors] lastChecked=%d pos=(%.5f %.5f %.5f)\n",
+               last,
+               pts[last].coords[0], pts[last].coords[1], pts[last].coords[2]);
     }
 }
 
@@ -893,6 +980,7 @@ __host__ void pipelineBuildNodeArray(char *fileName,Point3D<float> &center,float
     // debugPrintSampleColors<<<1,1>>>(samplePoints_d,count);
     // cudaDeviceSynchronize();
     ApplyVoxelGridFilterGPU(&samplePoints_d, &sampleNormals_d, &count, 1.0f/512.0f);
+
     // debugPrintSampleColors<<<1,1>>>(samplePoints_d,count);
     // cudaDeviceSynchronize();
     
@@ -1760,12 +1848,26 @@ __global__ void precomputeDepthAndCenter(int *BaseAddressArray_d,OctNode *NodeAr
     }
 }
 
-/**
- * 八叉树构建 preVertexArray
- */
+
+
+
+__global__ void printFirstPreVertices(VertexNode* verts,int n){
+    if(threadIdx.x||blockIdx.x) return;
+    int printed=0;
+    for(int i=0;i<n && printed<10;++i){
+        if(verts[i].ownerNodeIdx>0){ // 只看有效的
+            printf("[AFTER initVertexOwner] preVertex[%d] owner=%d kind=%d pos=(%.6f %.6f %.6f) color=%u %u %u\n",
+                   i, verts[i].ownerNodeIdx, verts[i].vertexKind,
+                   verts[i].pos.coords[0],verts[i].pos.coords[1],verts[i].pos.coords[2],
+                   verts[i].color[0],verts[i].color[1],verts[i].color[2]);
+            ++printed;
+        }
+    }
+}
 __global__ void initVertexOwner(OctNode *NodeArray,int left,int right,
                                 VertexNode *preVertexArray,
-                                int *DepthBuffer,Point3D<float> *CenterBuffer){
+                                int *DepthBuffer,Point3D<float> *CenterBuffer,
+                                Point3D<float> *samplePoints_d){
     int stride=gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
     int blockId = (gridDim.x * blockIdx.y) + blockIdx.x;
     int offset= (blockId * (blockDim.x * blockDim.y)) + (threadIdx.y * blockDim.x) + threadIdx.x;
@@ -1797,8 +1899,7 @@ __global__ void initVertexOwner(OctNode *NodeArray,int left,int right,
         }
 
 #pragma unroll
-        for(int j=0;j<8;++j)
-            NodeOwnerKey[j]=0x7fffffff;
+        for(int j=0;j<8;++j) NodeOwnerKey[j]=0x7fffffff;
         for(int j=0;j<8;++j){
             for(int k=0;k<27;++k){
                 if(neigh[k] != -1 && SquareDistance(vertexPos[j],neighCenter[k]) < Widthsq){
@@ -1810,72 +1911,81 @@ __global__ void initVertexOwner(OctNode *NodeArray,int left,int right,
                 }
             }
         }
+        // 预先计算当前节点平均颜色
+        unsigned int avgR=0,avgG=0,avgB=0;
+        int pstart = NodeArray[i].pidx;
+        int pnum   = NodeArray[i].pnum;
+        if(pnum>0){
+            for(int p=0;p<pnum;++p){
+                const Point3D<float>& sp = samplePoints_d[pstart+p];
+                avgR += sp.color[0];
+                avgG += sp.color[1];
+                avgB += sp.color[2];
+            }
+            avgR/=pnum; avgG/=pnum; avgB/=pnum;
+        }
 #pragma unroll
         for(int j=0;j<8;++j) {
             if(NodeOwnerIdx[j] == i) {
                 int vertexIdx = 8 * (i - left) + j;
                 preVertexArray[vertexIdx].ownerNodeIdx = i;
-                preVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0] ;
-                preVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1] ;
-                preVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
+                preVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0];
+                preVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1];
+                preVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2];
                 preVertexArray[vertexIdx].vertexKind = j;
                 preVertexArray[vertexIdx].depth = depth;
-
-                // // 取该节点最近的原始点的颜色
-                // int nearestIdx = NodeArray[i].pidx; // 或者你有更好的最近点索引
-                // preVertexArray[vertexIdx].color[0] = samplePoints_d[nearestIdx].color[0];
-                // preVertexArray[vertexIdx].color[1] = samplePoints_d[nearestIdx].color[1];
-                // preVertexArray[vertexIdx].color[2] = samplePoints_d[nearestIdx].color[2];
+                preVertexArray[vertexIdx].color[0] = (unsigned char)avgR;
+                preVertexArray[vertexIdx].color[1] = (unsigned char)avgG;
+                preVertexArray[vertexIdx].color[2] = (unsigned char)avgB;
             }
         }
     }
 }
 
-// only process vertex at maxDepth
+// 修改两个 initSubdivideVertexOwner 版本: 增加 NodeArray 与 samplePoints_d 以便继承原节点颜色
 __global__ void initSubdivideVertexOwner(int NodeArray_sz,
                                          OctNode *SubdivideArray,int left,int right,
                                          VertexNode *SubdividePreVertexArray,
-                                         Point3D<float> *SubdivideArrayCenterBuffer){
-    int stride=gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
-    int blockId = (gridDim.x * blockIdx.y) + blockIdx.x;
-    int offset= (blockId * (blockDim.x * blockDim.y)) + (threadIdx.y * blockDim.x) + threadIdx.x;
+                                         Point3D<float> *SubdivideArrayCenterBuffer,
+                                         OctNode *NodeArray,
+                                         Point3D<float> *samplePoints_d){
+    int stride=gridDim.x*gridDim.y*gridDim.z*blockDim.x*blockDim.y*blockDim.z;
+    int blockId=(gridDim.x*blockIdx.y)+blockIdx.x;
+    int offset=(blockId*(blockDim.x*blockDim.y))+(threadIdx.y*blockDim.x)+threadIdx.x;
     offset+=left;
-    int NodeOwnerKey[8];
-    int NodeOwnerIdx[8];
+    int NodeOwnerKey[8]; int NodeOwnerIdx[8];
     for(int i=offset;i<right;i+=stride){
-        int depth = maxDepth;
-        float halfWidth = 1.0f/(1<<(depth+1));
-        float Width = 1.0f/(1<<depth);
-        float Widthsq = Width * Width;
-        Point3D<float> neighCenter[27];
-        int neigh[27];
+        float halfWidth=1.0f/(1<<(maxDepth+1));
+        float Width=1.0f/(1<<maxDepth);
+        float Widthsq=Width*Width;
+        Point3D<float> neighCenter[27]; int neigh[27];
 #pragma unroll
         for(int k=0;k<27;++k){
             neigh[k]=SubdivideArray[i].neighs[k];
-            if(neigh[k] != -1 && neigh[k] >= NodeArray_sz){
-                neighCenter[k] = SubdivideArrayCenterBuffer[neigh[k] - NodeArray_sz];
+            if(neigh[k]!=-1 && neigh[k] >= NodeArray_sz){
+                neighCenter[k]=SubdivideArrayCenterBuffer[neigh[k]-NodeArray_sz];
+            }else if(neigh[k]!=-1){
+                // 原 octree 邻居
+                Point3D<float> c; // 不在此版本需要完整中心(若需要可传 CenterBuffer)
+                // 简化: 不插入旧层面颜色的邻居中心时不会成为 owner, 直接跳过
             }
         }
-        const Point3D<float> &nodeCenter = neighCenter[13];
-
+        const Point3D<float> &nodeCenter=neighCenter[13];
         Point3D<float> vertexPos[8];
 #pragma unroll
-        for(int j=0;j<8;++j) {
-            vertexPos[j].coords[0] = nodeCenter.coords[0] + (2 * (j & 1) - 1) * halfWidth;
-            vertexPos[j].coords[1] = nodeCenter.coords[1] + (2 * ((j & 2) >> 1) - 1) * halfWidth;
-            vertexPos[j].coords[2] = nodeCenter.coords[2] + (2 * ((j & 4) >> 2) - 1) * halfWidth;
+        for(int j=0;j<8;++j){
+            vertexPos[j].coords[0]=nodeCenter.coords[0]+(2*(j&1)-1)*halfWidth;
+            vertexPos[j].coords[1]=nodeCenter.coords[1]+(2*((j&2)>>1)-1)*halfWidth;
+            vertexPos[j].coords[2]=nodeCenter.coords[2]+(2*((j&4)>>2)-1)*halfWidth;
         }
-
 #pragma unroll
-        for(int j=0;j<8;++j)
-            NodeOwnerKey[j]=0x7fffffff;
+        for(int j=0;j<8;++j) NodeOwnerKey[j]=0x7fffffff;
         for(int j=0;j<8;++j){
             for(int k=0;k<27;++k){
-                if(neigh[k] != -1 && SquareDistance(vertexPos[j],neighCenter[k]) < Widthsq){
+                if(neigh[k]!=-1 && SquareDistance(vertexPos[j],neighCenter[k])<Widthsq){
                     int neighKey;
-                    if(neigh[k] < NodeArray_sz) continue;
-                    else
-                        neighKey=SubdivideArray[neigh[k]-NodeArray_sz].key;
+                    if(neigh[k]<NodeArray_sz) continue;
+                    else neighKey=SubdivideArray[neigh[k]-NodeArray_sz].key;
                     if(NodeOwnerKey[j]>neighKey){
                         NodeOwnerKey[j]=neighKey;
                         NodeOwnerIdx[j]=neigh[k];
@@ -1883,66 +1993,77 @@ __global__ void initSubdivideVertexOwner(int NodeArray_sz,
                 }
             }
         }
+        // 平均颜色(若归属原节点)
 #pragma unroll
-        for(int j=0;j<8;++j) {
-            if(NodeOwnerIdx[j] == NodeArray_sz + i) {
-                int vertexIdx = 8 * (i - left) + j;
-                SubdividePreVertexArray[vertexIdx].ownerNodeIdx = NodeOwnerIdx[j];
-                SubdividePreVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0] ;
-                SubdividePreVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1] ;
-                SubdividePreVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
-                SubdividePreVertexArray[vertexIdx].vertexKind = j;
-                SubdividePreVertexArray[vertexIdx].depth = depth;
+        for(int j=0;j<8;++j){
+            if(NodeOwnerIdx[j]==NodeArray_sz+i){
+                int vertexIdx=8*(i-left)+j;
+                SubdividePreVertexArray[vertexIdx].ownerNodeIdx=NodeOwnerIdx[j];
+                SubdividePreVertexArray[vertexIdx].pos=vertexPos[j];
+                SubdividePreVertexArray[vertexIdx].vertexKind=j;
+                SubdividePreVertexArray[vertexIdx].depth=maxDepth;
+                unsigned char R=0,G=0,B=0;
+                int ownerGlobal=NodeOwnerIdx[j];
+                if(ownerGlobal < NodeArray_sz){
+                    int st=NodeArray[ownerGlobal].pidx;
+                    int num=NodeArray[ownerGlobal].pnum;
+                    unsigned int r=0,g=0,b=0;
+                    if(num>0){
+                        for(int pp=0;pp<num;++pp){
+                            const Point3D<float>& sp=samplePoints_d[st+pp];
+                            r+=sp.color[0]; g+=sp.color[1]; b+=sp.color[2];
+                        }
+                        R=r/num; G=g/num; B=b/num;
+                    }
+                }
+                SubdividePreVertexArray[vertexIdx].color[0]=R;
+                SubdividePreVertexArray[vertexIdx].color[1]=G;
+                SubdividePreVertexArray[vertexIdx].color[2]=B;
             }
         }
     }
 }
 
-// only process vertex at maxDepth
 __global__ void initSubdivideVertexOwner(int NodeArray_sz,
                                          EasyOctNode *SubdivideArray,int left,int right,
                                          VertexNode *SubdividePreVertexArray,
-                                         Point3D<float> *SubdivideArrayCenterBuffer){
-    int stride=gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
-    int blockId = (gridDim.x * blockIdx.y) + blockIdx.x;
-    int offset= (blockId * (blockDim.x * blockDim.y)) + (threadIdx.y * blockDim.x) + threadIdx.x;
+                                         Point3D<float> *SubdivideArrayCenterBuffer,
+                                         OctNode *NodeArray,
+                                         Point3D<float> *samplePoints_d){
+    // 与上一个版本同样逻辑，可复制上面代码，仅把 OctNode 替换为 EasyOctNode 访问
+    int stride=gridDim.x*gridDim.y*gridDim.z*blockDim.x*blockDim.y*blockDim.z;
+    int blockId=(gridDim.x*blockIdx.y)+blockIdx.x;
+    int offset=(blockId*(blockDim.x*blockDim.y))+(threadIdx.y*blockDim.x)+threadIdx.x;
     offset+=left;
-    int NodeOwnerKey[8];
-    int NodeOwnerIdx[8];
+    int NodeOwnerKey[8]; int NodeOwnerIdx[8];
     for(int i=offset;i<right;i+=stride){
-        int depth = maxDepth;
-        float halfWidth = 1.0f/(1<<(depth+1));
-        float Width = 1.0f/(1<<depth);
-        float Widthsq = Width * Width;
-        Point3D<float> neighCenter[27];
-        int neigh[27];
+        float halfWidth=1.0f/(1<<(maxDepth+1));
+        float Width=1.0f/(1<<maxDepth);
+        float Widthsq=Width*Width;
+        Point3D<float> neighCenter[27]; int neigh[27];
 #pragma unroll
         for(int k=0;k<27;++k){
             neigh[k]=SubdivideArray[i].neighs[k];
-            if(neigh[k] != -1 && neigh[k] >= NodeArray_sz){
-                neighCenter[k] = SubdivideArrayCenterBuffer[neigh[k] - NodeArray_sz];
+            if(neigh[k]!=-1 && neigh[k] >= NodeArray_sz){
+                neighCenter[k]=SubdivideArrayCenterBuffer[neigh[k]-NodeArray_sz];
             }
         }
-        const Point3D<float> &nodeCenter = neighCenter[13];
-
+        const Point3D<float> &nodeCenter=neighCenter[13];
         Point3D<float> vertexPos[8];
 #pragma unroll
-        for(int j=0;j<8;++j) {
-            vertexPos[j].coords[0] = nodeCenter.coords[0] + (2 * (j & 1) - 1) * halfWidth;
-            vertexPos[j].coords[1] = nodeCenter.coords[1] + (2 * ((j & 2) >> 1) - 1) * halfWidth;
-            vertexPos[j].coords[2] = nodeCenter.coords[2] + (2 * ((j & 4) >> 2) - 1) * halfWidth;
+        for(int j=0;j<8;++j){
+            vertexPos[j].coords[0]=nodeCenter.coords[0]+(2*(j&1)-1)*halfWidth;
+            vertexPos[j].coords[1]=nodeCenter.coords[1]+(2*((j&2)>>1)-1)*halfWidth;
+            vertexPos[j].coords[2]=nodeCenter.coords[2]+(2*((j&4)>>2)-1)*halfWidth;
         }
-
 #pragma unroll
-        for(int j=0;j<8;++j)
-            NodeOwnerKey[j]=0x7fffffff;
+        for(int j=0;j<8;++j) NodeOwnerKey[j]=0x7fffffff;
         for(int j=0;j<8;++j){
             for(int k=0;k<27;++k){
-                if(neigh[k] != -1 && SquareDistance(vertexPos[j],neighCenter[k]) < Widthsq){
+                if(neigh[k]!=-1 && SquareDistance(vertexPos[j],neighCenter[k])<Widthsq){
                     int neighKey;
-                    if(neigh[k] < NodeArray_sz) continue;
-                    else
-                        neighKey=SubdivideArray[neigh[k]-NodeArray_sz].key;
+                    if(neigh[k]<NodeArray_sz) continue;
+                    else neighKey=SubdivideArray[neigh[k]-NodeArray_sz].key;
                     if(NodeOwnerKey[j]>neighKey){
                         NodeOwnerKey[j]=neighKey;
                         NodeOwnerIdx[j]=neigh[k];
@@ -1951,19 +2072,239 @@ __global__ void initSubdivideVertexOwner(int NodeArray_sz,
             }
         }
 #pragma unroll
-        for(int j=0;j<8;++j) {
-            if(NodeOwnerIdx[j] == NodeArray_sz + i) {
-                int vertexIdx = 8 * (i - left) + j;
-                SubdividePreVertexArray[vertexIdx].ownerNodeIdx = NodeOwnerIdx[j];
-                SubdividePreVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0] ;
-                SubdividePreVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1] ;
-                SubdividePreVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
-                SubdividePreVertexArray[vertexIdx].vertexKind = j;
-                SubdividePreVertexArray[vertexIdx].depth = depth;
+        for(int j=0;j<8;++j){
+            if(NodeOwnerIdx[j]==NodeArray_sz+i){
+                int vertexIdx=8*(i-left)+j;
+                SubdividePreVertexArray[vertexIdx].ownerNodeIdx=NodeOwnerIdx[j];
+                SubdividePreVertexArray[vertexIdx].pos=vertexPos[j];
+                SubdividePreVertexArray[vertexIdx].vertexKind=j;
+                SubdividePreVertexArray[vertexIdx].depth=maxDepth;
+                unsigned char R=0,G=0,B=0;
+                int ownerGlobal=NodeOwnerIdx[j];
+                if(ownerGlobal < NodeArray_sz){
+                    int st=NodeArray[ownerGlobal].pidx;
+                    int num=NodeArray[ownerGlobal].pnum;
+                    unsigned int r=0,g=0,b=0;
+                    if(num>0){
+                        for(int pp=0;pp<num;++pp){
+                            const Point3D<float>& sp=samplePoints_d[st+pp];
+                            r+=sp.color[0]; g+=sp.color[1]; b+=sp.color[2];
+                        }
+                        R=r/num; G=g/num; B=b/num;
+                    }
+                }
+                SubdividePreVertexArray[vertexIdx].color[0]=R;
+                SubdividePreVertexArray[vertexIdx].color[1]=G;
+                SubdividePreVertexArray[vertexIdx].color[2]=B;
             }
         }
     }
 }
+
+/**
+ * 八叉树构建 preVertexArray
+ */
+// __global__ void initVertexOwner(OctNode *NodeArray,int left,int right,
+//                                 VertexNode *preVertexArray,
+//                                 int *DepthBuffer,Point3D<float> *CenterBuffer){
+//     int stride=gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
+//     int blockId = (gridDim.x * blockIdx.y) + blockIdx.x;
+//     int offset= (blockId * (blockDim.x * blockDim.y)) + (threadIdx.y * blockDim.x) + threadIdx.x;
+//     offset+=left;
+//     int NodeOwnerKey[8];
+//     int NodeOwnerIdx[8];
+//     for(int i=offset;i<right;i+=stride){
+//         int depth = DepthBuffer[i];
+//         float halfWidth = 1.0f/(1<<(depth+1));
+//         float Width = 1.0f/(1<<depth);
+//         float Widthsq = Width * Width;
+//         Point3D<float> neighCenter[27];
+//         int neigh[27];
+// #pragma unroll
+//         for(int k=0;k<27;++k){
+//             neigh[k]=NodeArray[i].neighs[k];
+//             if(neigh[k] != -1){
+//                 neighCenter[k]=CenterBuffer[neigh[k]];
+//             }
+//         }
+//         const Point3D<float> &nodeCenter = neighCenter[13];
+
+//         Point3D<float> vertexPos[8];
+// #pragma unroll
+//         for(int j=0;j<8;++j) {
+//             vertexPos[j].coords[0] = nodeCenter.coords[0] + (2 * (j & 1) - 1) * halfWidth;
+//             vertexPos[j].coords[1] = nodeCenter.coords[1] + (2 * ((j & 2) >> 1) - 1) * halfWidth;
+//             vertexPos[j].coords[2] = nodeCenter.coords[2] + (2 * ((j & 4) >> 2) - 1) * halfWidth;
+//         }
+
+// #pragma unroll
+//         for(int j=0;j<8;++j)
+//             NodeOwnerKey[j]=0x7fffffff;
+//         for(int j=0;j<8;++j){
+//             for(int k=0;k<27;++k){
+//                 if(neigh[k] != -1 && SquareDistance(vertexPos[j],neighCenter[k]) < Widthsq){
+//                     int neighKey=NodeArray[neigh[k]].key;
+//                     if(NodeOwnerKey[j]>neighKey){
+//                         NodeOwnerKey[j]=neighKey;
+//                         NodeOwnerIdx[j]=neigh[k];
+//                     }
+//                 }
+//             }
+//         }
+// #pragma unroll
+//         for(int j=0;j<8;++j) {
+//             if(NodeOwnerIdx[j] == i) {
+//                 int vertexIdx = 8 * (i - left) + j;
+//                 preVertexArray[vertexIdx].ownerNodeIdx = i;
+//                 preVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0] ;
+//                 preVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1] ;
+//                 preVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
+//                 preVertexArray[vertexIdx].vertexKind = j;
+//                 preVertexArray[vertexIdx].depth = depth;
+
+//                 // // 取该节点最近的原始点的颜色
+//                 // int nearestIdx = NodeArray[i].pidx; // 或者你有更好的最近点索引
+//                 // preVertexArray[vertexIdx].color[0] = samplePoints_d[nearestIdx].color[0];
+//                 // preVertexArray[vertexIdx].color[1] = samplePoints_d[nearestIdx].color[1];
+//                 // preVertexArray[vertexIdx].color[2] = samplePoints_d[nearestIdx].color[2];
+//             }
+//         }
+//     }
+// }
+
+// // only process vertex at maxDepth
+// __global__ void initSubdivideVertexOwner(int NodeArray_sz,
+//                                          OctNode *SubdivideArray,int left,int right,
+//                                          VertexNode *SubdividePreVertexArray,
+//                                          Point3D<float> *SubdivideArrayCenterBuffer){
+//     int stride=gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
+//     int blockId = (gridDim.x * blockIdx.y) + blockIdx.x;
+//     int offset= (blockId * (blockDim.x * blockDim.y)) + (threadIdx.y * blockDim.x) + threadIdx.x;
+//     offset+=left;
+//     int NodeOwnerKey[8];
+//     int NodeOwnerIdx[8];
+//     for(int i=offset;i<right;i+=stride){
+//         int depth = maxDepth;
+//         float halfWidth = 1.0f/(1<<(depth+1));
+//         float Width = 1.0f/(1<<depth);
+//         float Widthsq = Width * Width;
+//         Point3D<float> neighCenter[27];
+//         int neigh[27];
+// #pragma unroll
+//         for(int k=0;k<27;++k){
+//             neigh[k]=SubdivideArray[i].neighs[k];
+//             if(neigh[k] != -1 && neigh[k] >= NodeArray_sz){
+//                 neighCenter[k] = SubdivideArrayCenterBuffer[neigh[k] - NodeArray_sz];
+//             }
+//         }
+//         const Point3D<float> &nodeCenter = neighCenter[13];
+
+//         Point3D<float> vertexPos[8];
+// #pragma unroll
+//         for(int j=0;j<8;++j) {
+//             vertexPos[j].coords[0] = nodeCenter.coords[0] + (2 * (j & 1) - 1) * halfWidth;
+//             vertexPos[j].coords[1] = nodeCenter.coords[1] + (2 * ((j & 2) >> 1) - 1) * halfWidth;
+//             vertexPos[j].coords[2] = nodeCenter.coords[2] + (2 * ((j & 4) >> 2) - 1) * halfWidth;
+//         }
+
+// #pragma unroll
+//         for(int j=0;j<8;++j)
+//             NodeOwnerKey[j]=0x7fffffff;
+//         for(int j=0;j<8;++j){
+//             for(int k=0;k<27;++k){
+//                 if(neigh[k] != -1 && SquareDistance(vertexPos[j],neighCenter[k]) < Widthsq){
+//                     int neighKey;
+//                     if(neigh[k] < NodeArray_sz) continue;
+//                     else
+//                         neighKey=SubdivideArray[neigh[k]-NodeArray_sz].key;
+//                     if(NodeOwnerKey[j]>neighKey){
+//                         NodeOwnerKey[j]=neighKey;
+//                         NodeOwnerIdx[j]=neigh[k];
+//                     }
+//                 }
+//             }
+//         }
+// #pragma unroll
+//         for(int j=0;j<8;++j) {
+//             if(NodeOwnerIdx[j] == NodeArray_sz + i) {
+//                 int vertexIdx = 8 * (i - left) + j;
+//                 SubdividePreVertexArray[vertexIdx].ownerNodeIdx = NodeOwnerIdx[j];
+//                 SubdividePreVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0] ;
+//                 SubdividePreVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1] ;
+//                 SubdividePreVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
+//                 SubdividePreVertexArray[vertexIdx].vertexKind = j;
+//                 SubdividePreVertexArray[vertexIdx].depth = depth;
+//             }
+//         }
+//     }
+// }
+
+// // only process vertex at maxDepth
+// __global__ void initSubdivideVertexOwner(int NodeArray_sz,
+//                                          EasyOctNode *SubdivideArray,int left,int right,
+//                                          VertexNode *SubdividePreVertexArray,
+//                                          Point3D<float> *SubdivideArrayCenterBuffer){
+//     int stride=gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
+//     int blockId = (gridDim.x * blockIdx.y) + blockIdx.x;
+//     int offset= (blockId * (blockDim.x * blockDim.y)) + (threadIdx.y * blockDim.x) + threadIdx.x;
+//     offset+=left;
+//     int NodeOwnerKey[8];
+//     int NodeOwnerIdx[8];
+//     for(int i=offset;i<right;i+=stride){
+//         int depth = maxDepth;
+//         float halfWidth = 1.0f/(1<<(depth+1));
+//         float Width = 1.0f/(1<<depth);
+//         float Widthsq = Width * Width;
+//         Point3D<float> neighCenter[27];
+//         int neigh[27];
+// #pragma unroll
+//         for(int k=0;k<27;++k){
+//             neigh[k]=SubdivideArray[i].neighs[k];
+//             if(neigh[k] != -1 && neigh[k] >= NodeArray_sz){
+//                 neighCenter[k] = SubdivideArrayCenterBuffer[neigh[k] - NodeArray_sz];
+//             }
+//         }
+//         const Point3D<float> &nodeCenter = neighCenter[13];
+
+//         Point3D<float> vertexPos[8];
+// #pragma unroll
+//         for(int j=0;j<8;++j) {
+//             vertexPos[j].coords[0] = nodeCenter.coords[0] + (2 * (j & 1) - 1) * halfWidth;
+//             vertexPos[j].coords[1] = nodeCenter.coords[1] + (2 * ((j & 2) >> 1) - 1) * halfWidth;
+//             vertexPos[j].coords[2] = nodeCenter.coords[2] + (2 * ((j & 4) >> 2) - 1) * halfWidth;
+//         }
+
+// #pragma unroll
+//         for(int j=0;j<8;++j)
+//             NodeOwnerKey[j]=0x7fffffff;
+//         for(int j=0;j<8;++j){
+//             for(int k=0;k<27;++k){
+//                 if(neigh[k] != -1 && SquareDistance(vertexPos[j],neighCenter[k]) < Widthsq){
+//                     int neighKey;
+//                     if(neigh[k] < NodeArray_sz) continue;
+//                     else
+//                         neighKey=SubdivideArray[neigh[k]-NodeArray_sz].key;
+//                     if(NodeOwnerKey[j]>neighKey){
+//                         NodeOwnerKey[j]=neighKey;
+//                         NodeOwnerIdx[j]=neigh[k];
+//                     }
+//                 }
+//             }
+//         }
+// #pragma unroll
+//         for(int j=0;j<8;++j) {
+//             if(NodeOwnerIdx[j] == NodeArray_sz + i) {
+//                 int vertexIdx = 8 * (i - left) + j;
+//                 SubdividePreVertexArray[vertexIdx].ownerNodeIdx = NodeOwnerIdx[j];
+//                 SubdividePreVertexArray[vertexIdx].pos.coords[0] = vertexPos[j].coords[0] ;
+//                 SubdividePreVertexArray[vertexIdx].pos.coords[1] = vertexPos[j].coords[1] ;
+//                 SubdividePreVertexArray[vertexIdx].pos.coords[2] = vertexPos[j].coords[2] ;
+//                 SubdividePreVertexArray[vertexIdx].vertexKind = j;
+//                 SubdividePreVertexArray[vertexIdx].depth = depth;
+//             }
+//         }
+//     }
+// }
 
 struct validVertex{
     __device__ bool operator()(const VertexNode &x){
@@ -2915,24 +3256,182 @@ __global__ void generateTriNums(EasyOctNode *NodeArray,
     }
 }
 
+// __device__ void interpolatePoint(const Point3D<float> &p1,const Point3D<float> &p2,
+//                                  const int &dim,const float &v1,const float &v2,
+//                                  Point3D<float> & out)
+// {
+//     for(int i=0;i<3;++i){
+//         if(i!=dim){
+//             out.coords[i]=p1.coords[i];
+//         }
+//     }
+//     float pivot = v1/(v1-v2);
+//     float another_pivot=1-pivot;
+//     out.coords[dim]= p2.coords[dim] * pivot + p1.coords[dim] * another_pivot;
+// //    out.coords[dim]=p1.coords[dim]+(p2.coords[dim]-p1.coords[dim])*pivot;
+
+//     // 颜色插值
+//     for(int c=0;c<3;++c){
+//         out.color[c] = static_cast<unsigned char>(p2.color[c] * pivot + p1.color[c] * another_pivot + 0.5f);
+//     }
+// }
+
+// __global__ void colorIsoVerticesKNN(Point3D<float>* isoVerts,int isoN,
+//                                     const Point3D<float>* samples,int sampleN,
+//                                     int K)
+// {
+//     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+//     if(tid >= isoN) return;
+
+//     // 调整 K
+//     if(K > sampleN) K = sampleN;
+//     if(K <= 0){
+//         return;
+//     }
+
+//     // 局部数组保存 K 个最近点
+//     float bestDist[64];   // MAX_KNN_NEIGHBORS >= 64
+//     int   bestIdx[64];
+//     for(int i=0;i<K;++i){
+//         bestDist[i]=1e30f;
+//         bestIdx[i]=-1;
+//     }
+
+//     const float qx = isoVerts[tid].coords[0];
+//     const float qy = isoVerts[tid].coords[1];
+//     const float qz = isoVerts[tid].coords[2];
+
+//     // 暴力扫描所有原始点
+//     for(int i=0;i<sampleN;++i){
+//         float dx = qx - samples[i].coords[0];
+//         float dy = qy - samples[i].coords[1];
+//         float dz = qz - samples[i].coords[2];
+//         float d2 = dx*dx + dy*dy + dz*dz;
+
+//         // 插入到有序 bestDist (简单线性插入)
+//         if(d2 < bestDist[K-1]){
+//             int pos = K-1;
+//             while(pos>0 && d2 < bestDist[pos-1]){
+//                 bestDist[pos]=bestDist[pos-1];
+//                 bestIdx[pos]=bestIdx[pos-1];
+//                 --pos;
+//             }
+//             bestDist[pos]=d2;
+//             bestIdx[pos]=i;
+//         }
+//     }
+
+//     // 颜色平均
+//     unsigned int r=0,g=0,b=0;
+//     int realK=0;
+//     for(int i=0;i<K;++i){
+//         if(bestIdx[i]<0) break;
+//         const Point3D<float>& sp = samples[bestIdx[i]];
+//         r += sp.color[0];
+//         g += sp.color[1];
+//         b += sp.color[2];
+//         ++realK;
+//     }
+//     if(realK>0){
+//         isoVerts[tid].color[0] = (unsigned char)(r/realK);
+//         isoVerts[tid].color[1] = (unsigned char)(g/realK);
+//         isoVerts[tid].color[2] = (unsigned char)(b/realK);
+//     }
+// }
+
+
+__global__ void colorIsoVerticesKNN(Point3D<float>* isoVerts,int isoN,
+                                    const Point3D<float>* samples,int sampleN,
+                                    int K)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if(tid >= isoN) return;
+    if(K > sampleN) K = sampleN;
+    if(K <= 0) return;
+
+    float bestDist[64];
+    int   bestIdx[64];
+    for(int i=0;i<K;++i){ bestDist[i]=1e30f; bestIdx[i]=-1; }
+
+    const float qx=isoVerts[tid].coords[0];
+    const float qy=isoVerts[tid].coords[1];
+    const float qz=isoVerts[tid].coords[2];
+
+    for(int i=0;i<sampleN;++i){
+        float dx=qx-samples[i].coords[0];
+        float dy=qy-samples[i].coords[1];
+        float dz=qz-samples[i].coords[2];
+        float d2=dx*dx+dy*dy+dz*dz;
+        if(d2 < bestDist[K-1]){
+            int pos=K-1;
+            while(pos>0 && d2 < bestDist[pos-1]){
+                bestDist[pos]=bestDist[pos-1];
+                bestIdx[pos]=bestIdx[pos-1];
+                --pos;
+            }
+            bestDist[pos]=d2;
+            bestIdx[pos]=i;
+        }
+    }
+
+    unsigned int r=0,g=0,b=0;
+    int realK=0;
+    for(int i=0;i<K;++i){
+        if(bestIdx[i]<0) break;
+        const Point3D<float>& sp=samples[bestIdx[i]];
+        r+=sp.color[0]; g+=sp.color[1]; b+=sp.color[2];
+        ++realK;
+    }
+
+    if(realK>0 && (r|g|b)){
+        isoVerts[tid].color[0]=r/realK;
+        isoVerts[tid].color[1]=g/realK;
+        isoVerts[tid].color[2]=b/realK;
+    }else{
+        // 回退: 找最近的非零颜色点
+        unsigned char fr=0,fg=0,fb=0;
+        float bestNonZero=1e30f;
+        for(int i=0;i<sampleN;++i){
+            unsigned char sr=samples[i].color[0];
+            unsigned char sg=samples[i].color[1];
+            unsigned char sb=samples[i].color[2];
+            if(!(sr|sg|sb)) continue;
+            float dx=qx-samples[i].coords[0];
+            float dy=qy-samples[i].coords[1];
+            float dz=qz-samples[i].coords[2];
+            float d2=dx*dx+dy*dy+dz*dz;
+            if(d2 < bestNonZero){
+                bestNonZero=d2;
+                fr=sr; fg=sg; fb=sb;
+            }
+        }
+        isoVerts[tid].color[0]=fr;
+        isoVerts[tid].color[1]=fg;
+        isoVerts[tid].color[2]=fb;
+    }
+}
+
 __device__ void interpolatePoint(const Point3D<float> &p1,const Point3D<float> &p2,
                                  const int &dim,const float &v1,const float &v2,
                                  Point3D<float> & out)
 {
+    // 坐标插值 (保留原逻辑)
     for(int i=0;i<3;++i){
-        if(i!=dim){
-            out.coords[i]=p1.coords[i];
-        }
+        if(i!=dim) out.coords[i]=p1.coords[i];
     }
-    float pivot = v1/(v1-v2);
-    float another_pivot=1-pivot;
-    out.coords[dim]= p2.coords[dim] * pivot + p1.coords[dim] * another_pivot;
-//    out.coords[dim]=p1.coords[dim]+(p2.coords[dim]-p1.coords[dim])*pivot;
+    float denom = v1 - v2;
+    float pivot;
+    if(fabsf(denom) < 1e-8f) pivot = 0.5f;
+    else {
+        pivot = v1 / denom;
+        pivot = fminf(fmaxf(pivot,0.f),1.f);
+    }
+    out.coords[dim] = p2.coords[dim] * pivot + p1.coords[dim] * (1.f - pivot);
 
-    // 颜色插值
-    for(int c=0;c<3;++c){
-        out.color[c] = static_cast<unsigned char>(p2.color[c] * pivot + p1.color[c] * another_pivot + 0.5f);
-    }
+    // 颜色不在此处插值，置为占位，后续 KNN 重新赋值
+    out.color[0]=0;
+    out.color[1]=0;
+    out.color[2]=0;
 }
 
 __global__ void generateIntersectionPoint(EdgeNode *validEdgeArray,int validEdgeArray_sz,
@@ -3879,10 +4378,21 @@ int main(int argc,char** argv) {
     CHECK(cudaMemset(preVertexArray,0,nByte));
     grid=(32,32);
     block=(32,32);
+    // initVertexOwner<<<grid,block>>>(NodeArray,0,NodeArray_sz,
+    //                                 preVertexArray,
+    //                                 DepthBuffer,CenterBuffer);
+
+    // printFirstPreVertices<<<1,1>>>(preVertexArray,8*NodeArray_sz);
+    // cudaDeviceSynchronize();
+
+    // TODO
     initVertexOwner<<<grid,block>>>(NodeArray,0,NodeArray_sz,
-                                    preVertexArray,
-                                    DepthBuffer,CenterBuffer);
+                                preVertexArray,
+                                DepthBuffer,CenterBuffer,
+                                samplePoints_d);
     cudaDeviceSynchronize();
+    // printFirstPreVertices<<<1,1>>>(preVertexArray,8*NodeArray_sz);
+    // cudaDeviceSynchronize();
 
     VertexNode *VertexArray=NULL;
 //    nByte = 1ll * sizeof(VertexNode) * 8 * NodeArray_sz;
@@ -4117,6 +4627,15 @@ int main(int argc,char** argv) {
                                               VertexBuffer);
     cudaDeviceSynchronize();
 
+    // debugPrintSampleColors<<<1,1>>>(VertexBuffer,100000000);
+    // cudaDeviceSynchronize();
+
+    int Kcolor = 8;
+    int threads=256;
+    int blocks=(allVexNums+threads-1)/threads;
+    colorIsoVerticesKNN<<<blocks,threads>>>(VertexBuffer, allVexNums,
+                                            samplePoints_d, count, Kcolor);
+
     grid = (32,32);
 
     double mid12=cpuSecond();
@@ -4139,6 +4658,14 @@ int main(int argc,char** argv) {
                                         vexAddress,
                                         triAddress,TriangleBuffer,
                                         FaceArray,hasSurfaceIntersection);
+    cudaDeviceSynchronize();
+
+
+    // int threads = 256;
+    int vBlocks = (allVexNums + threads - 1)/threads;
+    patchBlackVertexColors_linear<<<vBlocks,threads>>>(VertexBuffer, allVexNums,
+                                                TriangleBuffer, allTriNums,
+                                                2);
     cudaDeviceSynchronize();
 
     double mid13=cpuSecond();
@@ -4311,10 +4838,16 @@ int main(int argc,char** argv) {
         CHECK(cudaMalloc((VertexNode**)&SubdividePreVertexArray,nByte));
         CHECK(cudaMemset(SubdividePreVertexArray,0,nByte));
 
+        // initSubdivideVertexOwner<<<grid,block>>>(NodeArray_sz,
+        //                                          SubdivideArray,fixedDepthNodeAddress[maxDepth_h],SubdivideArray_sz,
+        //                                          SubdividePreVertexArray,
+        //                                          SubdivideArrayCenterBuffer);
         initSubdivideVertexOwner<<<grid,block>>>(NodeArray_sz,
-                                                 SubdivideArray,fixedDepthNodeAddress[maxDepth_h],SubdivideArray_sz,
-                                                 SubdividePreVertexArray,
-                                                 SubdivideArrayCenterBuffer);
+                                                SubdivideArray,fixedDepthNodeAddress[maxDepth_h],SubdivideArray_sz,
+                                                SubdividePreVertexArray,
+                                                SubdivideArrayCenterBuffer,
+                                                NodeArray,
+                                                samplePoints_d);
         cudaDeviceSynchronize();
 
 
@@ -4513,6 +5046,16 @@ int main(int argc,char** argv) {
                                                            SubdivideVertexBuffer);
         cudaDeviceSynchronize();
 
+        // debugPrintSampleColors<<<1,1>>>(SubdivideVertexBuffer,10000000);
+        // cudaDeviceSynchronize();
+
+        int Kcolor = 8;
+        int threads = 256;
+        int blocks = (SubdivideAllVexNums + threads - 1) / threads;
+        colorIsoVerticesKNN<<<blocks,threads>>>(SubdivideVertexBuffer, SubdivideAllVexNums,
+                                                samplePoints_d, count, Kcolor);
+        cudaDeviceSynchronize();
+
         cudaFree(SubdivideValidEdgeArray);
         cudaFree(SubdivideValidVexAddress);
 
@@ -4664,10 +5207,16 @@ int main(int argc,char** argv) {
         CHECK(cudaMalloc((VertexNode **) &RebuildPreVertexArray, nByte));
         CHECK(cudaMemset(RebuildPreVertexArray, 0, nByte));
 
+        // initSubdivideVertexOwner<<<grid, block>>>(NodeArray_sz,
+        //                                           RebuildArray, depthNodeAddress[maxDepth_h], rebuildNums,
+        //                                           RebuildPreVertexArray,
+        //                                           RebuildCenterBuffer);
         initSubdivideVertexOwner<<<grid, block>>>(NodeArray_sz,
-                                                  RebuildArray, depthNodeAddress[maxDepth_h], rebuildNums,
-                                                  RebuildPreVertexArray,
-                                                  RebuildCenterBuffer);
+                                          RebuildArray, depthNodeAddress[maxDepth_h], rebuildNums,
+                                          RebuildPreVertexArray,
+                                          RebuildCenterBuffer,
+                                          NodeArray,
+                                          samplePoints_d);
         cudaDeviceSynchronize();
 
         VertexNode *RebuildVertexArray = NULL;
@@ -4868,6 +5417,18 @@ int main(int argc,char** argv) {
                                                             NodeArray_sz,
                                                             RebuildValidVexAddress, RebuildVvalue,
                                                             RebuildVertexBuffer);
+        cudaDeviceSynchronize();
+
+        int Kcolor = 8;
+        int threadsColor = 256;
+        int blocksColor = (RebuildAllVexNums + threadsColor - 1) / threadsColor;
+        colorIsoVerticesKNN<<<blocksColor,threadsColor>>>(
+            RebuildVertexBuffer,
+            RebuildAllVexNums,
+            samplePoints_d,
+            count,
+            Kcolor
+        );
         cudaDeviceSynchronize();
 
         cudaFree(RebuildValidEdgeArray);
